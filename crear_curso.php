@@ -84,7 +84,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <label class="form-label">Aula</label>
             <input type="text" name="aula" class="form-control" />
         </div>
-        <button type="submit" class="btn btn-primary w-100">Crear Curso ✅</button>
+        <button type="submit" class="btn btn-primary w-100">Crear Curso </button>
     </form>
 
     <div class="text-center mt-4">

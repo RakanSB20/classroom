@@ -91,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'userId' => $email
                     ]);
                     $service->invitations->create($invitation);
-                    $mensaje .= "📩 Invitación enviada a $email.<br>";
+                    $mensaje .= " Invitación enviada a $email.<br>";
                 } catch (Exception $invErr) {
                     $mensaje .= "❌ Error al enviar invitación a $email: " . htmlspecialchars($invErr->getMessage()) . "<br>";
                 }
@@ -142,7 +142,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <label class="form-label">Correo(s) del Alumno (separados por coma)</label>
             <textarea name="correo" class="form-control" rows="3" placeholder="ej: alumno1@gmail.com, alumno2@gmail.com" required></textarea>
         </div>
-        <button type="submit" class="btn btn-success w-100">Inscribir Alumno(s) ✅</button>
+        <button type="submit" class="btn btn-success w-100">Inscribir Alumno(s) </button>
     </form>
 
     <div class="text-center mt-4">
