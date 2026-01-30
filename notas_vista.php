@@ -55,28 +55,63 @@ if ($courseId) {
         ]);
 
         // PASO 1: Extraer categorías REALES de Google Classroom
-        // Obtener configuración del curso para categorías de grado
-        $courseDetails = $service->courses->get($courseId, ['fields' => 'gradingScheme']);
-        $gradingScheme = $courseDetails->getGradingScheme();
-        
-        $categoriasExtraidas = [];
-        if ($gradingScheme && $gradingScheme->getGradeCategories()) {
-            $gradeCategories = $gradingScheme->getGradeCategories();
-            foreach ($gradeCategories as $category) {
-                $categoriasExtraidas[] = [
-                    'id' => $category->getId(),
-                    'nombre' => $category->getName(),
-                    'peso' => $category->getWeight()
-                ];
-                
-                $db->sincronizarCategoria([
-                    'curso_id' => $courseId,
-                    'classroom_category_id' => $category->getId(),
-                    'nombre' => $category->getName(),
-                    'peso' => $category->getWeight()
-                ]);
-            }
+        // Obtener configuración del curso para categorías (SIN gradingScheme)
+        $courseDetails = $service->courses->get($courseId, [
+            'fields' => 'id,name,gradebookSettings(calculationType,gradeCategories(id,name,weight))'
+        ]);
+
+        // Reemplaza getGradingScheme() por gradebookSettings
+        $gradebook = method_exists($courseDetails, 'getGradebookSettings')
+            ? $courseDetails->getGradebookSettings()
+            : null;
+
+       $categoriasExtraidas = [];
+
+        if ($gradebook && method_exists($gradebook, 'getGradeCategories')) {
+    // 1) Asegúrate de que el curso use categorías ponderadas
+            $calcType = method_exists($gradebook, 'getCalculationType') ? $gradebook->getCalculationType() : null;
+                 if ($calcType !== 'WEIGHTED_CATEGORIES') {
+        // Si no usa WEIGHTED_CATEGORIES, no insertamos ni mostramos categorías
+                 $gradeCategories = [];
+                  } else {
+                    $gradeCategories = $gradebook->getGradeCategories() ?: [];
+                    }
+
+    foreach ($gradeCategories as $category) {
+        // 2) Conversión segura del peso
+        $pesoRaw = $category->getWeight(); // a veces viene como 300000 para 30%
+        if ($pesoRaw === null) {
+            // Sin peso => saltar esta categoría
+            continue;
         }
+
+        // Si es muy grande, asumimos escala de millonésimos y convertimos
+        $peso = ($pesoRaw > 1000) ? ($pesoRaw / 10000.0) : (float)$pesoRaw;
+
+        // 3) Validar rango 0..100 para no violar el CHECK de la tabla
+        if ($peso < 0 || $peso > 100) {
+            continue;
+        }
+
+        // Normalizar a 2 decimales (tu columna es DECIMAL(5,2))
+        $peso = (float) number_format($peso, 2, '.', '');
+
+        // Arreglo de salida (si lo usas en la vista)
+        $categoriasExtraidas[] = [
+            'id'     => $category->getId(),
+            'nombre' => $category->getName(),
+            'peso'   => $peso
+        ];
+
+        // 4) Guardar/actualizar en BD
+        $db->sincronizarCategoria([
+            'curso_id'              => $courseId,
+            'classroom_category_id' => $category->getId(),
+            'nombre'                => $category->getName(),
+            'peso'                  => $peso
+        ]);
+    }
+}
 
         // PASO 2: Obtener y sincronizar estudiantes
         $response = $service->courses_students->listCoursesStudents($courseId);
@@ -108,17 +143,24 @@ if ($courseId) {
         }
 
         // PASO 3: Obtener y sincronizar tareas del curso
-        $courseworkResponse = $service->courses_courseWork->listCoursesCourseWork($courseId);
+        $courseworkResponse = $service->courses_courseWork->listCoursesCourseWork($courseId /*, [
+            // opcional: puedes pedir campos específicos
+            // 'fields' => 'courseWork(id,title,description,maxPoints,gradeCategory(id))'
+        ]*/);
         $courseworks = $courseworkResponse->getCourseWork();
         
         if ($courseworks) {
             foreach ($courseworks as $coursework) {
+                // Obtener el ID de categoría desde el objeto gradeCategory (no getGradeCategoryId())
+                $gc = method_exists($coursework, 'getGradeCategory') ? $coursework->getGradeCategory() : null;
+                $gradeCategoryId = ($gc && method_exists($gc, 'getId')) ? $gc->getId() : null;
+
                 $tareas[] = [
                     'id' => $coursework->getId(),
                     'titulo' => $coursework->getTitle(),
                     'descripcion' => $coursework->getDescription(),
                     'puntos_max' => $coursework->getMaxPoints(),
-                    'category_id' => $coursework->getGradeCategoryId()
+                    'category_id' => $gradeCategoryId
                 ];
                 
                 // Sincronizar tarea en BD
@@ -131,7 +173,6 @@ if ($courseId) {
                 ]);
 
                 // PASO 4: Asignar automáticamente la tarea a su categoría si existe
-                $gradeCategoryId = $coursework->getGradeCategoryId();
                 if ($gradeCategoryId) {
                     $db->asignarTareaCategoriaByClassroomId($courseId, $gradeCategoryId, $coursework->getId());
                 }
@@ -302,14 +343,16 @@ if ($courseId) {
                             <?php endforeach; ?>
                             
                             <div class="text-center mt-4">
-                                <button class="btn btn-success btn-lg me-3" onclick="calcularPromediosPonderados()">
+                                <!--<button class="btn btn-success btn-lg me-3" onclick="calcularPromediosPonderados()">
                                     <i class="fas fa-calculator me-2"></i>Calcular Promedios Ponderados
-                                </button>
-                                <button class="btn btn-info btn-lg me-3" onclick="verTablaNotas()">
-                                    <i class="fas fa-table me-2"></i>Ver Tabla de Notas
-                                </button>
-                                <a href="exportar_excel.php?courseId=<?= $courseId ?>" class="btn btn-warning btn-lg">
+                                </button>-->
+                                <!-- Eliminado: el botón de Ver Tabla de Notas ahora se reemplaza por un apartado fijo -->
+                                <a href="exportar_excel.php?courseId=<?= $courseId ?>" class="btn btn-warning btn-lg me-2">
                                     <i class="fas fa-file-excel me-2"></i>Exportar Excel
+                                </a>
+                                <!-- NUEVO: Exportar Excel excluyendo la nota más baja -->
+                                <a href="exportar_excel.php?courseId=<?= $courseId ?>&omit_min=1" class="btn btn-warning btn-lg">
+                                    <i class="fas fa-file-excel me-2"></i>Exportar Excel (sin nota más baja)
                                 </a>
                             </div>
                         </div>
@@ -337,6 +380,38 @@ if ($courseId) {
                         </div>
                     </div>
                 <?php endif; ?>
+            <?php endif; ?>
+
+            <?php
+            // Mostrar la tabla de notas debajo de las categorías cuando existe un curso y al menos una categoría.
+            if ($curso && !empty($categorias)):
+            ?>
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-secondary text-white">
+                    <h5 class="mb-0">
+                        <i class="fas fa-table me-2"></i>
+                        Tabla de Notas
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <!-- Sección de controles para el modo de cálculo de la tabla -->
+                    <div class="d-flex flex-column flex-md-row align-items-start align-items-md-center mb-3" id="controlesTabla">
+                        <div id="estadoTabla" class="me-md-3 mb-2 mb-md-0 fw-bold text-info">
+                            <!-- Mensaje de estado se actualizará dinámicamente -->
+                        </div>
+                        <div class="btn-group" role="group" aria-label="Modo de cálculo">
+                            <button id="btnModoNormal" type="button" class="btn btn-outline-primary" onclick="verTablaNotasModo(0)">
+                                <i class="fas fa-list me-1"></i> Tabla sin cambios
+                            </button>
+                            <button id="btnModoSinMenor" type="button" class="btn btn-outline-warning" onclick="verTablaNotasModo(1)">
+                                <i class="fas fa-minus-circle me-1"></i> Tabla eliminando la nota más baja
+                            </button>
+                        </div>
+                    </div>
+                    <!-- Contenedor donde se renderizará la tabla -->
+                    <div id="tablaNotasContainer"></div>
+                </div>
+            </div>
             <?php endif; ?>
 
             <a href="index.php" class="btn btn-secondary">
@@ -399,6 +474,8 @@ if ($courseId) {
 <script>
 let categoriaActual = null;
 let tareasDisponibles = <?= json_encode($tareas) ?>;
+// Global variable para categorías y sus tareas. Se inicializa con las categorías sincronizadas,
+// pero se actualizará dinámicamente al cargar la tabla desde el backend.
 let categorias = <?= json_encode($categorias) ?>;
 
 function abrirModalTareas(categoriaId, nombreCategoria) {
@@ -515,81 +592,159 @@ function calcularPromediosPonderados() {
         });
 }
 
-function verTablaNotas() {
-    fetch(`gestionar_notas.php?action=obtener_promedios_ponderados&course_id=<?= $courseId ?>`)
+// Obsoleto: verTablaNotas() se dejó de usar porque la tabla ahora se muestra en la página.
+// function verTablaNotas() {
+//     fetch(`gestionar_notas.php?action=obtener_promedios_ponderados&course_id=<?= $courseId ?>`)
+//         .then(response => response.json())
+//         .then(data => {
+//             mostrarTablaNotasPonderadas(data);
+//             new bootstrap.Modal(document.getElementById('modalNotas')).show();
+//         });
+// }
+
+// Obtiene y muestra la tabla de promedios actuales en la página.
+// Nueva función para mostrar la tabla según el modo de cálculo.
+// omitir = 0 -> tabla con todas las notas
+// omitir = 1 -> tabla eliminando la nota más baja
+function verTablaNotasModo(omitir) {
+    // Actualizar mensaje y clases de botones
+    const estadoEl = document.getElementById('estadoTabla');
+    const btnNormal = document.getElementById('btnModoNormal');
+    const btnSinMenor = document.getElementById('btnModoSinMenor');
+    if (omitir === 1) {
+        estadoEl.textContent = 'Tabla eliminando la nota más baja';
+        btnNormal.classList.remove('btn-primary', 'active');
+        btnNormal.classList.add('btn-outline-primary');
+        btnSinMenor.classList.remove('btn-outline-warning');
+        btnSinMenor.classList.add('btn-warning', 'active');
+    } else {
+        estadoEl.textContent = 'Tabla sin cambios: se consideran todas las notas';
+        btnSinMenor.classList.remove('btn-warning', 'active');
+        btnSinMenor.classList.add('btn-outline-warning');
+        btnNormal.classList.remove('btn-outline-primary');
+        btnNormal.classList.add('btn-primary', 'active');
+    }
+    // Obtener datos desde el backend según el modo
+    fetch(`gestionar_notas.php?action=obtener_tabla_notas&course_id=<?= $courseId ?>&omitir_menor=${omitir}`)
         .then(response => response.json())
         .then(data => {
+            // Actualizar categorías globales si el backend las devuelve
+            if (data.categorias) {
+                categorias = data.categorias;
+            }
             mostrarTablaNotasPonderadas(data);
-            new bootstrap.Modal(document.getElementById('modalNotas')).show();
         });
 }
 
 function mostrarTablaNotasPonderadas(datos) {
-    const container = document.getElementById('tablaNotas');
+    const container = document.getElementById('tablaNotasContainer') || document.getElementById('tablaNotas');
 
+    // Validar datos
     if (!datos || !datos.estudiantes || datos.estudiantes.length === 0) {
         container.innerHTML = '<p class="text-center">No hay datos de notas disponibles.</p>';
         return;
     }
+    // Actualizar categorías globales (incluyen tareas)
+    if (datos.categorias) {
+        categorias = datos.categorias;
+    }
+    const estudiantes = datos.estudiantes;
 
-    let html = `
-        <div class="table-responsive">
-            <table class="table table-striped table-hover">
-                <thead class="table-dark">
-                    <tr>
-                        <th>Estudiante</th>
-                        <th>Email</th>
-    `;
-
-    // Agregar columnas para cada categoría
+    // Construir cabecera de la tabla con doble fila (categorías y tareas)
+    let html = '<div class="table-responsive"><table class="table table-striped table-hover">';
+    html += '<thead>';
+    // Fila de categorías
+    html += '<tr>';
+    html += '<th rowspan="2">N°</th>';
+    html += '<th rowspan="2">Nombre</th>';
     categorias.forEach(cat => {
-        html += `<th class="text-center">${cat.nombre}<br><small>(${cat.peso}%)</small></th>`;
+        const tareaCount = (cat.tareas && cat.tareas.length) ? cat.tareas.length : 0;
+        // +1 para el promedio de la categoría
+        const colspan = tareaCount + 1;
+        html += `<th class="text-center" colspan="${colspan}">${cat.nombre}<br><small>(${cat.peso}%)</small></th>`;
     });
+    html += '<th rowspan="2" class="bg-success text-white text-center">Promedio Final</th>';
+    html += '</tr>';
+    // Fila de tareas y promedio por categoría
+    html += '<tr>';
+    categorias.forEach(cat => {
+        if (cat.tareas && cat.tareas.length) {
+            let idx = 1;
+            cat.tareas.forEach(tarea => {
+                // Usamos un número secuencial por tarea dentro de su categoría para simplificar
+                html += `<th class="text-center" title="${tarea.titulo}">T${idx++}</th>`;
+            });
+        }
+        // Columna para promedio de la categoría
+        html += '<th class="text-center">Prom</th>';
+    });
+    html += '</tr>';
+    html += '</thead><tbody>';
 
-    html += `
-                        <th class="bg-success text-white text-center">Promedio Final</th>
-                    </tr>
-                </thead>
-                <tbody>
-    `;
-
-    // Agregar filas de estudiantes
-    datos.estudiantes.forEach(estudiante => {
-        html += `<tr>
-            <td><strong>${estudiante.nombre}</strong></td>
-            <td>${estudiante.email}</td>
-        `;
-
-        // Agregar promedios por categoría
+    // Construir filas de estudiantes
+    estudiantes.forEach((est, index) => {
+        html += '<tr>';
+        // Número y nombre
+        html += `<td>${index + 1}</td>`;
+        html += `<td><strong>${est.nombre}</strong></td>`;
+        // Recorrer categorías y sus tareas
         categorias.forEach(cat => {
-            const promedioCat = estudiante.promedios_categoria[cat.id] || 0;
-            const clase = promedioCat >= 17 ? 'text-success' : (promedioCat >= 11 ? 'text-warning' : 'text-danger');
-            html += `<td class="text-center ${clase}"><strong>${promedioCat.toFixed(2)}</strong></td>`;
+            if (cat.tareas && cat.tareas.length) {
+                cat.tareas.forEach(tarea => {
+                    const nota = (est.notas_tareas && est.notas_tareas[tarea.id] !== undefined) ? est.notas_tareas[tarea.id] : 0;
+                    // Determinar clases de color según nota
+                    let clase = '';
+                    if (nota >= 17) {
+                        clase = 'text-success';
+                    } else if (nota >= 11) {
+                        clase = 'text-warning';
+                    } else {
+                        clase = 'text-danger';
+                    }
+                    // Si esta tarea fue la omitida, agregar clase de resaltado
+                    let omitidaClase = '';
+                    if (est.tarea_omitida && est.tarea_omitida == tarea.id) {
+                        omitidaClase = ' bg-secondary text-white';
+                    }
+                    html += `<td class="text-center ${clase}${omitidaClase}">${nota.toFixed(2)}</td>`;
+                });
+            }
+            // Promedio de la categoría
+            const promCat = (est.promedios_categoria && est.promedios_categoria[cat.id] !== undefined) ? est.promedios_categoria[cat.id] : 0;
+            let claseProm = '';
+            if (promCat >= 17) {
+                claseProm = 'text-success';
+            } else if (promCat >= 11) {
+                claseProm = 'text-warning';
+            } else {
+                claseProm = 'text-danger';
+            }
+            html += `<td class="text-center ${claseProm}"><strong>${promCat.toFixed(2)}</strong></td>`;
         });
-
         // Promedio final
-        const promedioFinal = estudiante.promedio_final || 0;
-        const claseFinal = promedioFinal >= 17 ? 'text-success' : (promedioFinal >= 11 ? 'text-warning' : 'text-danger');
-        html += `<td class="text-center ${claseFinal}"><strong>${promedioFinal.toFixed(2)}</strong></td>`;
-        html += `</tr>`;
+        const promFinal = est.promedio_final || 0;
+        let claseFinal = '';
+        if (promFinal >= 17) {
+            claseFinal = 'text-success';
+        } else if (promFinal >= 11) {
+            claseFinal = 'text-warning';
+        } else {
+            claseFinal = 'text-danger';
+        }
+        html += `<td class="text-center ${claseFinal}"><strong>${promFinal.toFixed(2)}</strong></td>`;
+        html += '</tr>';
     });
-
-    html += `
-                </tbody>
-            </table>
-        </div>
-        <div class="mt-3">
-            <small class="text-muted">
-                <i class="fas fa-info-circle me-1"></i>
-                Los promedios se calculan de forma ponderada según los pesos asignados en Google Classroom (escala 0-20).
-                <br><strong>Escala de evaluación:</strong> 
-                <span class="text-success">17-20: Excelente</span> | 
-                <span class="text-warning">11-16: Aprobado</span> | 
-                <span class="text-danger">0-10: Desaprobado</span>
-            </small>
-        </div>
-    `;
-
+    html += '</tbody></table></div>';
+    // Leyenda de colores y nota omitida
+    html += '<div class="mt-3">';
+    html += '<small class="text-muted"><i class="fas fa-info-circle me-1"></i>';
+    html += 'Los promedios se calculan de forma ponderada según los pesos asignados en Google Classroom (escala 0-20).';
+    html += '<br><strong>Escala de evaluación:</strong> ';
+    html += '<span class="text-success">17-20: Excelente</span> | ';
+    html += '<span class="text-warning">11-16: Aprobado</span> | ';
+    html += '<span class="text-danger">0-10: Desaprobado</span>';
+    html += '<br><span class="bg-secondary text-white px-2 py-1 rounded">Celda gris</span>: nota omitida para el cálculo del promedio';
+    html += '</small></div>';
     container.innerHTML = html;
 }
 
@@ -630,6 +785,11 @@ document.addEventListener('DOMContentLoaded', function() {
             });
         });
     }
+
+    // Cargar la tabla por defecto en modo "sin cambios" cuando se cargue la página
+    <?php if ($curso && !empty($categorias)): ?>
+    verTablaNotasModo(0);
+    <?php endif; ?>
 });
 </script>
 </body>

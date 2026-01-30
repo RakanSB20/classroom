@@ -103,7 +103,7 @@ try {
 <div class="container py-5">
     <h1 class="text-center text-primary mb-4">
         <i class="fas fa-graduation-cap me-2"></i>
-        📚 Mis Cursos - Google Classroom
+        Instituto de Informática - Google Classroom
     </h1>
 
     <?php if ($mensaje): ?>
@@ -120,25 +120,25 @@ try {
             <div class="col-auto">
                 <a href="crear_curso.php" class="action-btn">
                     <i class="fas fa-plus-circle me-2"></i>
-                    ➕ Crear Curso
+                    Crear Curso
                 </a>
             </div>
             <div class="col-auto">
                 <a href="inscribir_alumno.php" class="action-btn">
                     <i class="fas fa-user-plus me-2"></i>
-                    👨‍🏫 Inscribir Alumnos
+                    Inscribir Alumnos
                 </a>
             </div>
             <div class="col-auto">
                 <a href="gestionar_profesores.php" class="action-btn">
                     <i class="fas fa-chalkboard-teacher me-2"></i>
-                    👩‍🏫 Gestionar Profesores
+                    Gestionar Profesores
                 </a>
             </div>
             <div class="col-auto">
                 <a href="logout.php" class="action-btn text-danger">
                     <i class="fas fa-sign-out-alt me-2"></i>
-                    🔒 Cerrar sesión
+                    Cerrar sesión
                 </a>
             </div>
         </div>

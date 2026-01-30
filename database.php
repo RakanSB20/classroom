@@ -188,9 +188,11 @@ class Database {
     public function calcularPromediosPonderados($curso_id) {
         try {
             // Obtener todos los estudiantes del curso
+            // Seleccionar solo estudiantes activos para evitar incluir eliminados
             $sqlEstudiantes = "SELECT DISTINCT id, nombre_completo, email 
                               FROM estudiantes 
                               WHERE curso_id = :curso_id 
+                              AND (activo = 1 OR activo IS NULL) 
                               ORDER BY nombre_completo";
             $stmtEstudiantes = $this->connection->prepare($sqlEstudiantes);
             $stmtEstudiantes->execute([':curso_id' => $curso_id]);
@@ -295,6 +297,259 @@ class Database {
         $stmt = $this->connection->prepare($sql);
         $stmt->execute([':curso_id' => $curso_id]);
         return $stmt->fetchAll();
+    }
+
+    // NUEVO: Método para calcular promedios ponderados excluyendo la nota más baja en cada categoría (si hay más de una)
+    public function calcularPromediosPonderadosSinMenor($curso_id) {
+        try {
+            // Obtener todos los estudiantes del curso
+            // Seleccionar solo estudiantes activos para evitar incluir eliminados
+            $sqlEstudiantes = "SELECT DISTINCT id, nombre_completo, email 
+                              FROM estudiantes 
+                              WHERE curso_id = :curso_id 
+                              AND (activo = 1 OR activo IS NULL) 
+                              ORDER BY nombre_completo";
+            $stmtEstudiantes = $this->connection->prepare($sqlEstudiantes);
+            $stmtEstudiantes->execute([':curso_id' => $curso_id]);
+            $estudiantes = $stmtEstudiantes->fetchAll();
+
+            // Obtener categorías del curso
+            $categorias = $this->obtenerCategoriasCurso($curso_id);
+            if (empty($categorias)) {
+                return ['estudiantes' => [], 'categorias' => $categorias];
+            }
+
+            $resultados = [];
+
+            foreach ($estudiantes as $estudiante) {
+                $estudianteData = [
+                    'id' => $estudiante['id'],
+                    'nombre' => $estudiante['nombre_completo'],
+                    'email' => $estudiante['email'],
+                    'promedios_categoria' => [],
+                    'promedio_final' => 0
+                ];
+                $promedioFinal = 0;
+
+                foreach ($categorias as $categoria) {
+                    // Obtener todas las notas vigesimales de la categoría para este estudiante
+                    $sqlNotas = "SELECT 
+                                    (CASE 
+                                        WHEN ne.nota_maxima > 0 THEN (ne.nota / ne.nota_maxima) * 20 
+                                        ELSE 0 
+                                    END) as nota_vigesimal
+                                 FROM categoria_tareas ct
+                                 INNER JOIN notas_estudiantes ne ON ct.tarea_id = ne.tarea_id
+                                 WHERE ct.categoria_id = :categoria_id 
+                                 AND ne.estudiante_id = :estudiante_id 
+                                 AND ne.curso_id = :curso_id
+                                 AND ne.nota IS NOT NULL";
+                    $stmtNotas = $this->connection->prepare($sqlNotas);
+                    $stmtNotas->execute([
+                        ':categoria_id' => $categoria['id'],
+                        ':estudiante_id' => $estudiante['id'],
+                        ':curso_id' => $curso_id
+                    ]);
+                    $filasNotas = $stmtNotas->fetchAll();
+
+                    $notas = [];
+                    foreach ($filasNotas as $fila) {
+                        $notaVal = $fila['nota_vigesimal'];
+                        if ($notaVal !== null) {
+                            $notas[] = (float)$notaVal;
+                        }
+                    }
+
+                    if (count($notas) > 1) {
+                        // Eliminar la nota más baja
+                        sort($notas); // orden ascendente
+                        array_shift($notas); // quitar el primer elemento (mínimo)
+                    }
+
+                    if (count($notas) > 0) {
+                        $promedioCat = array_sum($notas) / count($notas);
+                    } else {
+                        $promedioCat = 0;
+                    }
+                    $promedioCat = round($promedioCat, 2);
+
+                    $estudianteData['promedios_categoria'][$categoria['id']] = $promedioCat;
+                    $promedioFinal += ($promedioCat * $categoria['peso']) / 100;
+                }
+
+                $estudianteData['promedio_final'] = round($promedioFinal, 2);
+                $resultados[] = $estudianteData;
+            }
+
+            return ['estudiantes' => $resultados, 'categorias' => $categorias];
+
+        } catch (Exception $e) {
+            throw new Exception("Error al calcular promedios ponderados sin menor: " . $e->getMessage());
+        }
+    }
+
+    /**
+     * NUEVO: Calcula una tabla completa de notas para un curso. La tabla incluye todas las tareas
+     * organizadas por categorías y, para cada estudiante, la nota obtenida en cada tarea (escala 0-20),
+     * el promedio por categoría y el promedio ponderado final.  Si $omitir_menor es 1 se eliminará la
+     * nota más baja de todas las tareas de un estudiante, pero solamente de las categorías que tengan
+     * al menos 2 tareas asignadas.  La tarea eliminada queda identificada en el campo
+     * 'tarea_omitida' de cada estudiante para poder resaltar la celda en la vista.
+     *
+     * @param string $curso_id ID del curso de Google Classroom
+     * @param int    $omitir_menor 0 = no omitir nota, 1 = omitir la nota más baja global
+     * @return array  Estructura con claves 'categorias' (lista de categorías con sus tareas) y
+     *                'estudiantes' (notas por tarea, promedios y tarea omitida)
+     */
+    public function calcularTablaCompleta($curso_id, $omitir_menor = 0) {
+        try {
+            // Obtener categorías del curso (solo aquellas con classroom_category_id para evitar categorías manuales)
+            $categorias = $this->obtenerCategoriasCurso($curso_id);
+            if (empty($categorias)) {
+                return ['categorias' => [], 'estudiantes' => []];
+            }
+
+            // Obtener tareas por categoría
+            $tareasPorCategoria = [];
+            $tareasCountByCategoria = [];
+            foreach ($categorias as $categoria) {
+                $lista = $this->obtenerTareasCategoria($categoria['id']);
+                $tareasPorCategoria[$categoria['id']] = $lista;
+                $tareasCountByCategoria[$categoria['id']] = count($lista);
+            }
+
+            // Obtener todos los estudiantes activos del curso
+            $sqlEstudiantes = "SELECT id, nombre_completo, email
+                               FROM estudiantes
+                               WHERE curso_id = :curso_id
+                               AND (activo = 1 OR activo IS NULL)
+                               ORDER BY nombre_completo";
+            $stmtEstudiantes = $this->connection->prepare($sqlEstudiantes);
+            $stmtEstudiantes->execute([':curso_id' => $curso_id]);
+            $estudiantes = $stmtEstudiantes->fetchAll();
+            if (empty($estudiantes)) {
+                return ['categorias' => $categorias, 'estudiantes' => []];
+            }
+
+            // Obtener todas las notas de estudiantes para el curso en un solo query
+            $sqlNotas = "SELECT estudiante_id, tarea_id, nota, nota_maxima
+                         FROM notas_estudiantes
+                         WHERE curso_id = :curso_id";
+            $stmtNotas = $this->connection->prepare($sqlNotas);
+            $stmtNotas->execute([':curso_id' => $curso_id]);
+            $notasFilas = $stmtNotas->fetchAll();
+            // Organizar notas en un array indexado por estudiante y tarea
+            $notasPorEstudiante = [];
+            foreach ($notasFilas as $fila) {
+                $estId = $fila['estudiante_id'];
+                $tarId = $fila['tarea_id'];
+                if (!isset($notasPorEstudiante[$estId])) {
+                    $notasPorEstudiante[$estId] = [];
+                }
+                $notasPorEstudiante[$estId][$tarId] = [
+                    'nota' => $fila['nota'],
+                    'nota_maxima' => $fila['nota_maxima']
+                ];
+            }
+
+            $resultadosEstudiantes = [];
+
+            // Para cada estudiante, calcular notas y promedios
+            foreach ($estudiantes as $est) {
+                $estId = $est['id'];
+                $estData = [
+                    'id' => $estId,
+                    'nombre' => $est['nombre_completo'],
+                    'email' => $est['email'],
+                    'tarea_omitida' => null,
+                    'notas_tareas' => [],
+                    'promedios_categoria' => [],
+                    'promedio_final' => 0
+                ];
+
+                // Determinar tarea a omitir si corresponde
+                $tareaOmitidaId = null;
+                if ($omitir_menor == 1) {
+                    $minNota = null;
+                    $minTareaId = null;
+                    // Recorremos todas las tareas candidatas
+                    foreach ($tareasPorCategoria as $catId => $tareasLista) {
+                        // Solo considerar categorías con 2 o más tareas
+                        if ($tareasCountByCategoria[$catId] >= 2) {
+                            foreach ($tareasLista as $tarea) {
+                                $tId = $tarea['id'];
+                                // Calcular nota vigesimal (0-20). Si no hay nota, tratamos como 0.
+                                $notaInfo = $notasPorEstudiante[$estId][$tId] ?? null;
+                                $notaV = 0;
+                                if ($notaInfo && $notaInfo['nota_maxima'] > 0) {
+                                    $notaV = ($notaInfo['nota'] / $notaInfo['nota_maxima']) * 20;
+                                }
+                                // Buscar la mínima
+                                if ($minNota === null || $notaV < $minNota) {
+                                    $minNota = $notaV;
+                                    $minTareaId = $tId;
+                                }
+                            }
+                        }
+                    }
+                    $tareaOmitidaId = $minTareaId;
+                    $estData['tarea_omitida'] = $tareaOmitidaId;
+                }
+
+                // Calcular notas por tarea y promedios por categoría
+                $promedioFinal = 0;
+                foreach ($categorias as $cat) {
+                    $catId = $cat['id'];
+                    $taskList = $tareasPorCategoria[$catId];
+                    $sumNotas = 0;
+                    $contNotas = 0;
+                    foreach ($taskList as $tarea) {
+                        $tId = $tarea['id'];
+                        // Calcular nota vigesimal (0-20)
+                        $notaInfo = $notasPorEstudiante[$estId][$tId] ?? null;
+                        $notaV = 0;
+                        if ($notaInfo && $notaInfo['nota_maxima'] > 0) {
+                            $notaV = ($notaInfo['nota'] / $notaInfo['nota_maxima']) * 20;
+                        }
+                        // Guardar en notas_tareas
+                        $estData['notas_tareas'][$tId] = round($notaV, 2);
+                        // Si esta tarea es la omitida, no la tomamos en cuenta para el promedio
+                        if ($omitir_menor == 1 && $tareaOmitidaId && $tId == $tareaOmitidaId) {
+                            continue;
+                        }
+                        $sumNotas += $notaV;
+                        $contNotas++;
+                    }
+                    // Calcular promedio de la categoría
+                    $promCat = ($contNotas > 0) ? ($sumNotas / $contNotas) : 0;
+                    $promCat = round($promCat, 2);
+                    $estData['promedios_categoria'][$catId] = $promCat;
+                    // Sumar al promedio final ponderado
+                    $promedioFinal += ($promCat * $cat['peso']) / 100;
+                }
+                $estData['promedio_final'] = round($promedioFinal, 2);
+                $resultadosEstudiantes[] = $estData;
+            }
+
+            // Construir estructura de categorías con tareas
+            $categoriasConTareas = [];
+            foreach ($categorias as $cat) {
+                $catId = $cat['id'];
+                $categoriasConTareas[] = [
+                    'id' => $catId,
+                    'nombre' => $cat['nombre'],
+                    'peso' => $cat['peso'],
+                    'tareas' => $tareasPorCategoria[$catId] ?? []
+                ];
+            }
+
+            return [
+                'categorias' => $categoriasConTareas,
+                'estudiantes' => $resultadosEstudiantes
+            ];
+        } catch (Exception $e) {
+            throw new Exception("Error al calcular tabla completa: " . $e->getMessage());
+        }
     }
     
     // NUEVO: Método para limpiar categorías que no están en Classroom

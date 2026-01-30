@@ -57,6 +57,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 echo json_encode(['success' => false, 'message' => 'ID de curso requerido']);
             }
             break;
+
+        // NUEVO: obtener promedios ponderados excluyendo la nota más baja (GET)
+        case 'obtener_promedios_ponderados_sin_menor':
+            $course_id = $_GET['course_id'] ?? '';
+            if ($course_id) {
+                try {
+                    $resultados = $db->calcularPromediosPonderadosSinMenor($course_id);
+                    echo json_encode($resultados);
+                } catch (Exception $e) {
+                    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+                }
+            } else {
+                echo json_encode(['success' => false, 'message' => 'ID de curso requerido']);
+            }
+            break;
             
         case 'verificar_categorias':
             $course_id = $_GET['course_id'] ?? '';
@@ -84,6 +99,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET') {
                 try {
                     $stats = $db->obtenerEstadisticasCurso($course_id);
                     echo json_encode(['success' => true, 'estadisticas' => $stats]);
+                } catch (Exception $e) {
+                    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+                }
+            } else {
+                echo json_encode(['success' => false, 'message' => 'ID de curso requerido']);
+            }
+            break;
+
+        // NUEVO: obtener tabla completa de notas con todas las tareas y promedios por categoría
+        // omitir_menor = 0 -> tabla con todas las notas, omitir_menor = 1 -> descartar la nota más baja global
+        case 'obtener_tabla_notas':
+            $course_id = $_GET['course_id'] ?? '';
+            $omitir = isset($_GET['omitir_menor']) ? (int)$_GET['omitir_menor'] : 0;
+            if ($course_id) {
+                try {
+                    $tabla = $db->calcularTablaCompleta($course_id, $omitir);
+                    echo json_encode($tabla);
                 } catch (Exception $e) {
                     echo json_encode(['success' => false, 'message' => $e->getMessage()]);
                 }
@@ -179,6 +211,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 echo json_encode(['success' => false, 'message' => 'ID de curso requerido']);
             }
             break;
+
+        // NUEVO: calcular promedios ponderados excluyendo la nota más baja (POST)
+        case 'calcular_promedios_ponderados_sin_menor':
+            $course_id = $input['course_id'] ?? '';
+
+            if ($course_id) {
+                try {
+                    $resultados = $db->calcularPromediosPonderadosSinMenor($course_id);
+
+                    if (empty($resultados['estudiantes'])) {
+                        echo json_encode([
+                            'success' => false,
+                            'message' => 'No hay datos suficientes para calcular promedios'
+                        ]);
+                    } else {
+                        echo json_encode([
+                            'success' => true,
+                            'message' => 'Promedios calculados correctamente',
+                            'total_estudiantes' => count($resultados['estudiantes']),
+                            'total_categorias' => count($resultados['categorias'])
+                        ]);
+                    }
+                } catch (Exception $e) {
+                    echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+                }
+            } else {
+                echo json_encode(['success' => false, 'message' => 'ID de curso requerido']);
+            }
+            break;
             
         case 'obtener_detalle_notas':
             $course_id = $input['course_id'] ?? '';
@@ -187,7 +248,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 try {
                     $conn = $db->getConnection();
                     
-                    // Obtener estudiantes con sus notas detalladas
+                    // CORREGIDO: Usar columnas calculadas y escala 0-20
                     $sql = "SELECT 
                                 e.id as estudiante_id,
                                 e.nombre_completo,
@@ -197,10 +258,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 t.titulo as tarea_titulo,
                                 ne.nota,
                                 ne.nota_maxima,
+                                ne.nota_vigesimal as nota_sobre_20,
+                                ne.porcentaje_100 as porcentaje,
                                 CASE 
-                                    WHEN ne.nota_maxima > 0 THEN (ne.nota / ne.nota_maxima) * 20 
-                                    ELSE 0 
-                                END as nota_vigesimal
+                                    WHEN ne.nota_vigesimal >= 17 THEN 'Excelente'
+                                    WHEN ne.nota_vigesimal >= 11 THEN 'Aprobado' 
+                                    WHEN ne.nota_vigesimal > 0 THEN 'Desaprobado'
+                                    ELSE 'Sin calificar'
+                                END as clasificacion
                             FROM estudiantes e
                             CROSS JOIN categorias c
                             LEFT JOIN categoria_tareas ct ON c.id = ct.categoria_id
